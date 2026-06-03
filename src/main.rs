@@ -7,6 +7,8 @@ use axum::{
 use tokio::sync::broadcast;
 use std::env;
 use std::sync::Arc;
+use futures_util::StreamExt; 
+use futures_util::SinkExt;
 
 struct AppState {
     tx: broadcast::Sender<String>,
@@ -37,18 +39,23 @@ async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    // split()을 통해 송신부(sender)와 수신부(receiver)를 나눕니다.
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 
-    // 메시지 수신 (한 명이 보낸 걸 다른 모두에게 broadcast)
+    // 1. 메시지 수신 (수신부) - spawn으로 비동기 처리
+    let tx_clone = state.tx.clone();
     tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = receiver.recv().await {
-            let _ = state.tx.send(text);
+        while let Some(Ok(Message::Text(text))) = receiver.next().await {
+            let _ = tx_clone.send(text);
         }
     });
 
-    // 메시지 전달 (구독 중인 모든 사람에게 전송)
+    // 2. 메시지 전달 (송신부) - 루프에서 직접 처리
     while let Ok(msg) = rx.recv().await {
-        if sender.send(Message::Text(msg)).await.is_err() { break; }
+        // sender를 사용하여 메시지를 전송합니다.
+        if sender.send(Message::Text(msg)).await.is_err() {
+            break; 
+        }
     }
 }
