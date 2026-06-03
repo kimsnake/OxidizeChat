@@ -1,40 +1,43 @@
 use tokio::net::TcpListener;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::broadcast;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 8080 포트로 서버를 엽니다.
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    
-    // 2. 메시지를 브로드캐스트할 채널을 생성합니다 (최대 10개 메시지 유지).
-    let (tx, _rx) = broadcast::channel(10);
+    // Render는 환경 변수로 PORT를 전달합니다. 없다면 기본값 8080을 사용합니다.
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+
+    let listener = TcpListener::bind(&addr).await?;
+    println!("OxidizeChat 서버가 {}에서 실행 중입니다...", addr);
 
     loop {
-        let (mut socket, addr) = listener.accept().await?;
-        let tx = tx.clone();
-        let mut rx = tx.subscribe();
+        let (mut socket, _) = listener.accept().await?;
 
-        // 3. 각 클라이언트마다 별도의 비동기 태스크를 생성합니다.
         tokio::spawn(async move {
-            let (reader, mut writer) = socket.split();
-            let mut reader = BufReader::new(reader);
-            let mut line = String::new();
+            let mut buf = [0; 1024];
 
+            // 클라이언트에게 환영 메시지 전송
+            let welcome = "환영합니다! OxidizeChat 서버에 접속하셨습니다.\n";
+            if let Err(e) = socket.write_all(welcome.as_bytes()).await {
+                eprintln!("메시지 전송 실패: {}", e);
+                return;
+            }
+
+            // 에코(Echo) 기능: 입력받은 내용을 그대로 돌려줌
             loop {
-                tokio::select! {
-                    // 클라이언트로부터 메시지를 받을 때
-                    result = reader.read_line(&mut line) => {
-                        if result.unwrap_or(0) == 0 { break; }
-                        let msg = format!("{}: {}", addr, line);
-                        let _ = tx.send(msg);
-                        line.clear();
+                let n = match socket.read(&mut buf).await {
+                    Ok(n) if n == 0 => return,
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("읽기 오류: {}", e);
+                        return;
                     }
-                    // 다른 사람이 보낸 메시지를 받을 때
-                    result = rx.recv() => {
-                        let msg = result.unwrap();
-                        let _ = writer.write_all(msg.as_bytes()).await;
-                    }
+                };
+
+                if let Err(e) = socket.write_all(&buf[0..n]).await {
+                    eprintln!("쓰기 오류: {}", e);
+                    return;
                 }
             }
         });
